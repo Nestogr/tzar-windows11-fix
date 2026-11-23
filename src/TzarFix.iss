@@ -1,5 +1,5 @@
-﻿; Tzar Fix (GOG) - instalador / installer
-; Compilar / build:  ISCC.exe /DAppVersion=1.0.0 /DPayloadDir=..\build\payload src\TzarFix.iss
+﻿; Tzar Fix (GOG) - installer
+; Build:  ISCC.exe /DAppVersion=1.0.0 /DPayloadDir=..\build\payload src\TzarFix.iss
 
 #ifndef AppVersion
   #define AppVersion "1.0.0"

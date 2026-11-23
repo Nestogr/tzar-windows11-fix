@@ -1,13 +1,12 @@
 <#
-  tzarfix.ps1 - Arreglo para Tzar: The Burden of the Crown (GOG) en Windows 11 (probado) y 10.
   Fix for Tzar: The Burden of the Crown (GOG) on Windows 11 (tested) and 10.
 
-  Acciones / Actions:
-    -Action Install    Copia de seguridad + arreglo + verificacion (lo usa el instalador).
-    -Action Repair     Igual que Install; se auto-eleva y muestra el resultado (menu Inicio).
-    -Action Uninstall  Restaura todo desde la copia de seguridad original.
+  Actions:
+    -Action Install    Backup + fix + verification (used by the installer).
+    -Action Repair     Same as Install; self-elevates and shows the result (Start menu shortcut).
+    -Action Uninstall  Restores everything from the original backup.
 
-  Codigos de salida / Exit codes: 0 = verificado/ok, 2 = ok con avisos, 1 = error.
+  Exit codes: 0 = verified/ok, 2 = ok with warnings, 1 = error.
   MIT License. https://github.com/Nestogr/tzar-windows11-fix
 #>
 [CmdletBinding()]
@@ -17,8 +16,7 @@ param(
   [string]$Payload,
   [string]$ResultFile,
   [ValidateSet('', 'es', 'en', 'spanish', 'english')] [string]$Lang = '',
-  [switch]$NoUI,        # Repair: no mostrar ventanas (uso interno al auto-elevarse)
-  [switch]$Elevated     # uso interno
+  [switch]$NoUI         # Repair: no message boxes (internal, used after self-elevation)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,7 +24,7 @@ $ScriptDir = Split-Path -Parent $PSCommandPath
 if (-not $Payload) { $Payload = Join-Path $ScriptDir 'cnc-ddraw' }
 $RegKey = 'HKLM:\SOFTWARE\TzarFix'
 
-# ---------------------------------------------------------------- idioma / language
+# ---------------------------------------------------------------- language (user-facing messages)
 if ($Lang -eq 'spanish') { $Lang = 'es' } elseif ($Lang -eq 'english') { $Lang = 'en' }
 if (-not $Lang) { $Lang = if ((Get-UICulture).TwoLetterISOLanguageName -eq 'es') { 'es' } else { 'en' } }
 $Msgs = @{
@@ -76,7 +74,7 @@ $Msgs = @{
 $T = $Msgs[$Lang]   # user-facing messages
 $E = $Msgs['en']    # log is always English
 
-# ---------------------------------------------------------------- utilidades
+# ---------------------------------------------------------------- helpers
 $script:LogFile = $null
 function Write-Log([string]$msg) {
   # The log may be shared (e.g. in bug reports): never write the user's profile path / user name
@@ -97,7 +95,7 @@ function Set-Result([int]$code, [string]$msg) {
 function Test-Admin {
   ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-$Latin1 = [Text.Encoding]::GetEncoding(28591)   # conserva los bytes del ini tal cual
+$Latin1 = [Text.Encoding]::GetEncoding(28591)   # keeps the ini bytes exactly as they are
 
 function Read-Ini([string]$path) { [Collections.Generic.List[string]]([IO.File]::ReadAllLines($path, $Latin1)) }
 function Write-Ini([string]$path, $lines) {
@@ -129,7 +127,7 @@ function Set-IniValue($lines, [string]$section, [string]$key, $value) {
   $lines.Insert($lastKey + 1, "$key=$value")
 }
 
-# ---------------------------------------------------------------- lectura de memoria
+# ---------------------------------------------------------------- game memory reading
 if (-not ('TzFix.Mem' -as [type])) {
   Add-Type -Namespace TzFix -Name Mem -MemberDefinition @'
 [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(int access, bool inherit, int pid);
@@ -138,8 +136,8 @@ if (-not ('TzFix.Mem' -as [type])) {
 '@
 }
 
-# Localiza en Tzar.exe las variables de la comprobacion "invalidcfg" buscando el codigo
-# (funciones de validacion de video y sonido) en lugar de usar direcciones fijas.
+# Finds the variables used by Tzar.exe's "invalidcfg" check by scanning for the code of its video and
+# sound validation functions, instead of relying on hard-coded addresses.
 function Find-TzarAddresses([string]$exe) {
   $s = $Latin1.GetString([IO.File]::ReadAllBytes($exe))
   $o = [Text.RegularExpressions.RegexOptions]::Singleline
@@ -156,7 +154,7 @@ function Find-TzarAddresses([string]$exe) {
   }
 }
 
-# Lanza Tzar.exe, espera a que haga la comprobacion y lee lo que ha detectado y lo que leyo del ini.
+# Starts Tzar.exe, waits for its check and reads both what it detected and what it read from the ini.
 function Invoke-TzarProbe([string]$gameDir, $addr, [int]$timeoutSec = 25) {
   $exe = Join-Path $gameDir 'Tzar.exe'
   $p = Start-Process -FilePath $exe -WorkingDirectory $gameDir -PassThru
@@ -172,7 +170,7 @@ function Invoke-TzarProbe([string]$gameDir, $addr, [int]$timeoutSec = 25) {
       if ((& $rd16 $addr.DsReal) -ne 0 -or (& $rd16 $addr.WaveReal) -ne 0 -or (& $rd16 $addr.MidiReal) -ne 0) { $seen = $true; break }
       Start-Sleep -Milliseconds 250
     }
-    Start-Sleep -Milliseconds 2000   # deja terminar la deteccion MIDI
+    Start-Sleep -Milliseconds 2000   # let the MIDI detection finish
     if ($p.HasExited) { return [pscustomobject]@{ Exited = $true } }
     [pscustomobject]@{
       Exited = $false; Seen = $seen
@@ -189,7 +187,7 @@ function Invoke-TzarProbe([string]$gameDir, $addr, [int]$timeoutSec = 25) {
   }
 }
 
-# Replica la logica del juego (Tzar.exe 1.10): devuelve la lista de fallos, vacia = valido.
+# Mirrors the game's logic (Tzar.exe 1.10): returns the list of failures; empty = valid.
 function Test-TzarConfig($m) {
   $f = @()
   if ($m.CheckOn -eq 0) { return $f }
@@ -206,7 +204,7 @@ function Test-TzarConfig($m) {
   $f
 }
 
-# ---------------------------------------------------------------- shim de GOG y capas de compatibilidad
+# ---------------------------------------------------------------- GOG shim and compatibility layers
 $AcfRoot  = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags'
 function Get-GogShims {
   $custom = "$AcfRoot\Custom\Tzar.exe"
@@ -218,7 +216,7 @@ function Get-GogShims {
     })
 }
 function Invoke-Sdbinst([string[]]$arguments) {
-  # Start-Process no entrecomilla: las rutas con espacios se partirian
+  # Start-Process does not quote arguments: paths with spaces would be split
   $quoted = $arguments | ForEach-Object { if ($_ -match '\s') { '"{0}"' -f $_ } else { $_ } }
   $p = Start-Process -FilePath (Join-Path $env:windir 'System32\sdbinst.exe') -ArgumentList $quoted -Wait -PassThru -WindowStyle Hidden
   $p.ExitCode
@@ -235,14 +233,14 @@ function Get-TzarLayers([string]$gameDir) {
   }
 }
 
-# ---------------------------------------------------------------- rutas
+# ---------------------------------------------------------------- paths
 function Get-VirtualStoreIni([string]$gameDir) {
   if ($gameDir.Length -lt 4 -or $gameDir[1] -ne ':') { return $null }
   Join-Path (Join-Path $env:LOCALAPPDATA 'VirtualStore') (Join-Path $gameDir.Substring(3) 'tzar.ini')
 }
 $PayloadItems = @('ddraw.dll', 'ddraw.ini', 'cnc-ddraw config.exe', 'Shaders')
 
-# ---------------------------------------------------------------- copia de seguridad
+# ---------------------------------------------------------------- backup
 function New-OriginalBackup([string]$gameDir, [string]$orig) {
   if (Test-Path -LiteralPath (Join-Path $orig 'manifest.json')) { Write-Log "Original backup already exists, left untouched: $orig"; return }
   Write-Log "Creating original backup: $orig"
@@ -289,7 +287,7 @@ function Invoke-Fix([string]$gameDir) {
   if (-not $addr) { Stop-Tz 'Unsupported' }
   Write-Log ('Tzar.exe supported ({0:X}/{1:X}/{2:X})' -f $addr.DdCount, $addr.WaveReal, $addr.MidiReal)
 
-  # 1. Copias de seguridad
+  # 1. Backups
   $bkRoot = Join-Path $gameDir '_tzarfix_backup'
   New-OriginalBackup $gameDir (Join-Path $bkRoot 'original')
   $run = Join-Path $bkRoot ('run_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
@@ -299,13 +297,13 @@ function Invoke-Fix([string]$gameDir) {
   if ($vs -and (Test-Path -LiteralPath $vs)) { Copy-Item -LiteralPath $vs -Destination (Join-Path $run 'virtualstore_tzar.ini') }
   Write-Log "Backup of this run: $run"
 
-  # 2. Shim de GOG (EmulateHeap): hace fallar winmm dentro del juego -> sin MIDI/wave
+  # 2. GOG shim (EmulateHeap): makes winmm fail inside the game -> no MIDI/wave
   foreach ($s in @(Get-GogShims)) {
     $rc = Invoke-Sdbinst @('-q', '-u', '-g', $s.Guid)
     Write-Log (($E.ShimRemoved -f $s.Guid) + " sdbinst=$rc")
     if ($rc -ne 0 -and @(Get-GogShims).Count) { throw "sdbinst -u $($s.Guid) = $rc" }
   }
-  # Capas de compatibilidad sobre Tzar.exe (p.ej. DWM8And16BitMitigation) interfieren con cnc-ddraw
+  # Compatibility layers on Tzar.exe (e.g. DWM8And16BitMitigation) interfere with cnc-ddraw
   foreach ($l in @(Get-TzarLayers $gameDir)) {
     Remove-ItemProperty -LiteralPath $l.Key -Name $l.Name
     Write-Log "Removed compatibility layer: $($l.Key) = $($l.Value)"
@@ -323,7 +321,7 @@ function Invoke-Fix([string]$gameDir) {
   }
   Write-Log 'cnc-ddraw installed.'
 
-  # 4. tzar.ini: valores fijos necesarios
+  # 4. tzar.ini: required fixed values
   $base = [ordered]@{
     'VIDEO|DIRECTXDEVICE' = 0; 'VIDEO|BUFFER_IN_VIDEO_MEMORY' = 0; 'SETUP|DONESETUP' = 1
     'SOUND|SOUNDDEVICE' = -1; 'SOUND|SOUNDDEVICEDX' = -1; 'SOUND|SOUNDDEVICEMIDI' = -1
@@ -338,7 +336,7 @@ function Invoke-Fix([string]$gameDir) {
   }
   Update-Inis $base
 
-  # 5. Medir como lo hace el juego
+  # 5. Measure the devices the way the game does
   Write-Log $E.Measuring
   $m = Invoke-TzarProbe $gameDir $addr
   if ($m.Exited) { Stop-Tz 'GameExited' @($script:LogFile) }
@@ -351,7 +349,7 @@ function Invoke-Fix([string]$gameDir) {
   Update-Inis $vals
   Write-Log ('tzar.ini updated: ' + (($vals.Keys | ForEach-Object { "$($_.Split('|')[1])=$($vals[$_])" }) -join ' '))
 
-  # 6. Verificar con un segundo arranque
+  # 6. Verify with a second start
   $v = Invoke-TzarProbe $gameDir $addr
   if ($v.Exited) { Stop-Tz 'GameExited' @($script:LogFile) }
   $fails = @(Test-TzarConfig $v)
@@ -371,7 +369,7 @@ function Invoke-Restore([string]$gameDir) {
   $files = Join-Path $orig 'files'
   $errors = @()
 
-  # Copia del estado actual antes de restaurar
+  # Save the current state before restoring
   $pre = Join-Path $bkRoot ('before_uninstall_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
   New-Item -ItemType Directory -Force -Path $pre | Out-Null
   foreach ($f in @('tzar.ini', 'ddraw.ini')) { $p = Join-Path $gameDir $f; if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $pre } }
@@ -420,7 +418,7 @@ function Invoke-Restore([string]$gameDir) {
   @(0, $T.Restored)
 }
 
-# ---------------------------------------------------------------- Repair desde el menu Inicio
+# ---------------------------------------------------------------- Repair from the Start menu (not elevated)
 if ($Action -eq 'Repair' -and -not $NoUI) {
   Add-Type -AssemblyName System.Windows.Forms
   if (-not $GameDir) { $GameDir = (Get-ItemProperty $RegKey -ErrorAction SilentlyContinue).GameDir }
@@ -439,7 +437,7 @@ if ($Action -eq 'Repair' -and -not $NoUI) {
   exit $code
 }
 
-# ---------------------------------------------------------------- principal (elevado)
+# ---------------------------------------------------------------- main (elevated)
 $code = 1; $msg = ''
 try {
   if (-not (Test-Admin)) { Stop-Tz 'NotAdmin' }
